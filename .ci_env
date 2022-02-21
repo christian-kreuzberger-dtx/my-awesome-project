@@ -1,0 +1,4 @@
+IMAGE=my-awesome-project
+KEPTN_PROJECT=my-awesome-project
+KEPTN_SERVICE=foobar
+KEPTN_STAGE=dev

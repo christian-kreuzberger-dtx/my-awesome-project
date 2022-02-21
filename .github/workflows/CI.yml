@@ -1,0 +1,128 @@
+name: CI
+on:
+  # always execute docker build when something is pushed to master or release-* branches
+  push:
+    branches:
+      - 'master'
+      - 'main'
+defaults:
+  run:
+    shell: bash
+jobs:
+  prepare_ci_run:
+    name: Prepare CI Run
+    # Prepare CI Run looks at what has been changed in this commit/PR/... and determines which artifacts should be
+    # built afterwards (in other jobs that depend on this one).
+    runs-on: ubuntu-20.04
+    outputs: # declare what this job outputs (so it can be re-used for other jobs)
+      VERSION: ${{ steps.get_next_semver_tag.outputs.PATCH }}
+      DATETIME: ${{ steps.get_datetime.outputs.DATETIME }}
+      IMAGE_NAME: ${{ steps.prepare_image_name.outputs.IMAGE_NAME }}
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2.4.0
+        with:
+          fetch-depth: 0 # need to checkout "all commits" for certain features to work (e.g., get all changed files)
+
+      # loads things like IMAGE, KEPTN_PROJECT, etc...
+      - name: Load CI Environment from .ci_env
+        id: load_ci_env
+        uses: c-py/action-dotenv-to-setenv@v3
+        with:
+          env-file: .ci_env
+
+      - name: 'Get Previous tag'
+        id: get_previous_tag
+        uses: "WyriHaximus/github-action-get-previous-tag@v1.1"
+        with:
+          fallback: "0.0.1"
+
+      - name: 'Get next patch version'
+        id: get_next_semver_tag
+        uses: "WyriHaximus/github-action-next-semvers@v1.1"
+        with:
+          version: ${{ steps.get_previous_tag.outputs.tag }}
+
+      - name: Get current date and time
+        id: get_datetime
+        run: |
+          echo "::set-output name=DATETIME::$(date +'%Y%m%d')$(date +'%H%M')"
+
+      - name: Prepare Image Name
+        id: prepare_image_name
+        env:
+          VERSION: ${{ steps.get_next_semver_tag.outputs.PATCH }}
+          DATETIME: ${{ steps.get_datetime.outputs.DATETIME }}
+        run: |
+          echo "::set-output name=IMAGE_NAME::ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:${{ env.VERSION }}-dev.${{ env.DATETIME }}"
+
+  ############################################################################
+  # Build Docker Image                                                      #
+  ############################################################################
+  docker_build:
+    needs: [prepare_ci_run]
+    env:
+      VERSION: ${{ needs.prepare_ci_run.outputs.VERSION }}
+      DATETIME: ${{ needs.prepare_ci_run.outputs.DATETIME }}
+      IMAGE_NAME: ${{ needs.prepare_ci_run.outputs.IMAGE_NAME }}
+
+    name: Docker Build
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2.4.0
+    
+      # loads things like IMAGE, KEPTN_PROJECT, etc...
+      - name: Load CI Environment from .ci_env
+        id: load_ci_env
+        uses: c-py/action-dotenv-to-setenv@v3
+        with:
+          env-file: .ci_env
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Docker Build"
+        id: docker_build_image
+        uses: docker/build-push-action@v2
+        with:
+          tags: ${{ env.IMAGE_NAME }}
+
+      - name: Keptn Trigger Delivery
+        id: keptn_trigger_delivery
+        uses: keptn/gh-action-send-event@main
+        with:
+          keptnApiUrl: ${{ secrets.KEPTN_API_URL }}
+          keptnApiToken: ${{ secrets.KEPTN_API_TOKEN }}
+          event: |
+            {
+              "data": {
+                "configurationChange": {
+                  "values": {
+                    "image": "${{ env.IMAGE_NAME }}"
+                  }
+                },
+                "labels": {
+                  "app-version": "${{ env.VERSION }}",
+                  "build-datetime": "${{ env.DATETIME }}",
+                  "gh-actor": "${{ github.actor }}",
+                  "gh-ref": "${{ github.ref }}",
+                  "gh-sha": "${{ github.sha }}"
+                },
+                "project": "${{ env.KEPTN_PROJECT }}",
+                "service": "${{ env.KEPTN_SERVICE }}",
+                "stage": "${{ env.KEPTN_STAGE }}"
+              },
+              "source": "gh",
+              "specversion": "1.0",
+              "type": "sh.keptn.event.${{ env.KEPTN_STAGE }}.delivery.triggered",
+              "shkeptnspecversion": "0.2.1"
+            }
+
+      - name: Print the Keptn Context
+        run: echo "The keptn context is ${{ steps.send-keptn-event.outputs.keptnContext }}"
